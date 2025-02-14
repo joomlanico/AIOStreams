@@ -4,6 +4,8 @@ import {
   StreamRequest,
   ParsedNameData,
   Config,
+  ErrorStream,
+  ParseResult,
 } from '@aiostreams/types';
 import { parseFilename } from '@aiostreams/parser';
 import { getTextHash, serviceDetails, Settings } from '@aiostreams/utils';
@@ -38,14 +40,27 @@ export class BaseWrapper {
       : `${manifestUrl}/manifest.json`;
   }
 
-  public async getParsedStreams(
-    streamRequest: StreamRequest
-  ): Promise<ParsedStream[]> {
+  public async getParsedStreams(streamRequest: StreamRequest): Promise<{
+    addonStreams: ParsedStream[];
+    addonErrors: string[];
+  }> {
     const streams: Stream[] = await this.getStreams(streamRequest);
-    const parsedStreams: ParsedStream[] = streams
-      .map((stream) => this.parseStream(stream))
+    const errors: string[] = [];
+    const finalStreams = streams
+      .map((stream) => {
+        const { type, result } = this.parseStream(stream);
+        if (type === 'error') {
+          errors.push(result);
+          return undefined;
+        } else if (type === 'stream') {
+          return result;
+        } else {
+          return undefined;
+        }
+      })
       .filter((parsedStream) => parsedStream !== undefined);
-    return parsedStreams;
+
+    return { addonStreams: finalStreams, addonErrors: errors };
   }
 
   private getStreamUrl(streamRequest: StreamRequest) {
@@ -70,23 +85,25 @@ export class BaseWrapper {
       useProxy = false;
     } else if (Settings.ADDON_PROXY_CONFIG || Settings.ADDON_PROXY) {
       useProxy = true;
-      for (const rule of Settings.ADDON_PROXY_CONFIG?.split(',')) {
-        const [ruleHost, enabled] = rule.split(':');
-        if (['true', 'false'].includes(enabled) === false) {
-          console.error(
-            `|ERR| utils > shouldProxyRequest > Invalid rule: ${rule}`
-          );
-          continue;
-        }
-        if (ruleHost === '*') {
-          useProxy = !(enabled === 'false');
-        } else if (ruleHost.startsWith('*')) {
-          if (hostname.endsWith(ruleHost.slice(1))) {
+      if (Settings.ADDON_PROXY_CONFIG) {
+        for (const rule of Settings.ADDON_PROXY_CONFIG.split(',')) {
+          const [ruleHost, enabled] = rule.split(':');
+          if (['true', 'false'].includes(enabled) === false) {
+            console.error(
+              `|ERR| utils > shouldProxyRequest > Invalid rule: ${rule}`
+            );
+            continue;
+          }
+          if (ruleHost === '*') {
+            useProxy = !(enabled === 'false');
+          } else if (ruleHost.startsWith('*')) {
+            if (hostname.endsWith(ruleHost.slice(1))) {
+              useProxy = !(enabled === 'false');
+            }
+          }
+          if (hostname === ruleHost) {
             useProxy = !(enabled === 'false');
           }
-        }
-        if (hostname === ruleHost) {
-          useProxy = !(enabled === 'false');
         }
       }
     }
@@ -175,9 +192,12 @@ export class BaseWrapper {
     } catch (error: any) {
       let message = error.message;
       if (error.name === 'TimeoutError') {
-        message = `The request to ${this.addonName} timed out after ${this.indexerTimeout}ms`;
+        message = `The stream request to ${this.addonName} timed out after ${this.indexerTimeout}ms`;
+        return Promise.reject(new Error(message));
       }
-      return Promise.reject(new Error(message));
+      console.error(`|ERR| wrappers > base > ${this.addonName}: ${message}`);
+      console.error(error);
+      return Promise.reject(error.message);
     }
   }
 
@@ -193,82 +213,91 @@ export class BaseWrapper {
     duration?: number,
     personal?: boolean,
     infoHash?: string
-  ): ParsedStream {
+  ): ParseResult {
     return {
-      ...parsedInfo,
-      addon: { name: this.addonName, id: this.addonId },
-      filename: filename,
-      size: size,
-      url: stream.url,
-      externalUrl: stream.externalUrl,
-      _infoHash: infoHash,
-      torrent: {
-        infoHash: stream.infoHash,
-        fileIdx: stream.fileIdx,
-        sources: stream.sources,
-        seeders: seeders,
-      },
-      provider: provider,
-      usenet: {
-        age: usenetAge,
-      },
-      indexers: indexer,
-      duration: duration,
-      personal: personal,
-      type: stream.infoHash
-        ? 'p2p'
-        : usenetAge
-          ? 'usenet'
-          : provider
-            ? 'debrid'
-            : stream.url?.endsWith('.m3u8')
-              ? 'live'
-              : 'unknown',
-      stream: {
-        subtitles: stream.subtitles,
-        behaviorHints: {
-          countryWhitelist: stream.behaviorHints?.countryWhitelist,
-          notWebReady: stream.behaviorHints?.notWebReady,
-          proxyHeaders:
-            stream.behaviorHints?.proxyHeaders?.request ||
-            stream.behaviorHints?.proxyHeaders?.response
-              ? {
-                  request: stream.behaviorHints?.proxyHeaders?.request,
-                  response: stream.behaviorHints?.proxyHeaders?.response,
-                }
-              : undefined,
-          videoHash: stream.behaviorHints?.videoHash,
+      type: 'stream',
+      result: {
+        ...parsedInfo,
+        addon: { name: this.addonName, id: this.addonId },
+        filename: filename,
+        size: size,
+        url: stream.url,
+        externalUrl: stream.externalUrl,
+        _infoHash: infoHash,
+        torrent: {
+          infoHash: stream.infoHash,
+          fileIdx: stream.fileIdx,
+          sources: stream.sources,
+          seeders: seeders,
+        },
+        provider: provider,
+        usenet: {
+          age: usenetAge,
+        },
+        indexers: indexer,
+        duration: duration,
+        personal: personal,
+        type: stream.infoHash
+          ? 'p2p'
+          : usenetAge
+            ? 'usenet'
+            : provider
+              ? 'debrid'
+              : stream.url?.endsWith('.m3u8')
+                ? 'live'
+                : 'unknown',
+        stream: {
+          subtitles: stream.subtitles,
+          behaviorHints: {
+            countryWhitelist: stream.behaviorHints?.countryWhitelist,
+            notWebReady: stream.behaviorHints?.notWebReady,
+            proxyHeaders:
+              stream.behaviorHints?.proxyHeaders?.request ||
+              stream.behaviorHints?.proxyHeaders?.response
+                ? {
+                    request: stream.behaviorHints?.proxyHeaders?.request,
+                    response: stream.behaviorHints?.proxyHeaders?.response,
+                  }
+                : undefined,
+            videoHash: stream.behaviorHints?.videoHash,
+          },
         },
       },
     };
   }
-  protected parseStream(stream: { [key: string]: any }): ParsedStream {
+  protected parseStream(stream: { [key: string]: any }): ParseResult {
+    // see if the stream is an error
+    const errorRegex = /invalid\s+\w+\s+(account|apikey|token)/i;
+    if (
+      errorRegex.test(stream.title || '') ||
+      errorRegex.test(stream.description || '')
+    ) {
+      console.log(
+        `|ERR| wrappers > base > ${this.addonName}: ${stream.title || stream.description} was detected as an error`
+      );
+      return {
+        type: 'error',
+        result: stream.title || stream.description,
+      };
+    }
     // attempt to look for filename in behaviorHints.filename
-    let filename =
-      stream?.behaviorHints?.filename || stream.torrentTitle || stream.filename;
+    let filename = stream?.behaviorHints?.filename || stream.filename;
 
     // if filename behaviorHint is not present, attempt to look for a filename in the stream description or title
     let description = stream.description || stream.title;
-
+    const episodeRegex =
+      /(?<![^ [_(\-.]])(?:s(?:eason)?[ .\-_]?(\d+)[ .\-_]?(?:e(?:pisode)?[ .\-_]?(\d+))?|(\d+)[xX](\d+))(?![^ \])_.-])/;
+    const yearRegex = /(?<![^ [_(\-.])(\d{4})(?=[ \])_.-]|$)/i;
     if (!filename && description) {
       const lines = description.split('\n');
       filename =
         lines.find(
-          (line: string) =>
-            line.match(
-              /(?<![^ [_(\-.]])(?:s(?:eason)?[ .\-_]?(\d+)[ .\-_]?(?:e(?:pisode)?[ .\-_]?(\d+))?|(\d+)[xX](\d+))(?![^ \])_.-])/
-            ) || line.match(/(?<![^ [_(\-.])(\d{4})(?=[ \])_.-]|$)/i)
+          (line: string) => line.match(episodeRegex) || line.match(yearRegex)
         ) || lines[0];
     }
 
     let stringToParse: string = filename || description || '';
-    if (
-      !(
-        filename.match(
-          /(?<![^ [_(\-.]])(?:s(?:eason)?[ .\-_]?(\d+)[ .\-_]?(?:e(?:pisode)?[ .\-_]?(\d+))?|(\d+)[xX](\d+))(?![^ \])_.-])/
-        ) || filename.match(/(?<![^ [_(\-.])(\d{4})(?=[ \])_.-]|$)/i)
-      )
-    ) {
+    if (!(filename.match(episodeRegex) || filename.match(yearRegex))) {
       stringToParse = description.replace(/\n/g, ' ').trim();
     }
     let parsedInfo: ParsedNameData = parseFilename(stringToParse);
@@ -280,7 +309,6 @@ export class BaseWrapper {
       stream.size ||
       stream.sizebytes ||
       stream.sizeBytes ||
-      stream.torrentSize ||
       (description && this.extractSizeInBytes(description, 1024)) ||
       (stream.name && this.extractSizeInBytes(stream.name, 1024)) ||
       undefined;
@@ -447,15 +475,16 @@ export class BaseWrapper {
   protected extractDurationInMs(input: string): number {
     // Regular expression to match different formats of time durations
     const regex =
-      /(\d+)h[:\s]?(\d+)m[:\s]?(\d+)s|(\d+)h[:\s]?(\d+)m|(\d+)h|(\d+)m|(\d+)s/gi;
+      /(?<![^\s\[(_\-,.])(?:(\d+)h[:\s]?(\d+)m[:\s]?(\d+)s|(\d+)h[:\s]?(\d+)m|(\d+)h|(\d+)m|(\d+)s)(?=[\s\)\]_.\-,]|$)/gi;
+
     const match = regex.exec(input);
     if (!match) {
       return 0;
     }
 
-    const hours = parseInt(match[1] || match[4] || match[5] || '0', 10);
-    const minutes = parseInt(match[2] || match[5] || match[6] || '0', 10);
-    const seconds = parseInt(match[3] || match[6] || match[7] || '0', 10);
+    const hours = parseInt(match[1] || match[4] || match[6] || '0', 10);
+    const minutes = parseInt(match[2] || match[5] || match[7] || '0', 10);
+    const seconds = parseInt(match[3] || match[8] || '0', 10);
 
     // Convert to milliseconds
     const totalMilliseconds = (hours * 3600 + minutes * 60 + seconds) * 1000;
@@ -515,6 +544,18 @@ export class BaseWrapper {
   }
 
   protected extractCountryCodes(string: string): string[] {
+    // only consider text after the movie/show title
+    const episodeRegex =
+      /(?<![^ [_(\-.]])(?:s(?:eason)?[ .\-_]?(\d+)[ .\-_]?(?:e(?:pisode)?[ .\-_]?(\d+))?|(\d+)x(\d+))(?![^ \])_.-])/i;
+    const yearRegex = /(?<![^ [_(\-.])(\d{4})(?=[ \])_.-]|$)/i;
+
+    const episodeMatch = string.match(episodeRegex);
+    const yearMatch = string.match(yearRegex);
+    if (episodeMatch && episodeMatch.index) {
+      string = string.slice(episodeMatch.index + episodeMatch[0].length);
+    } else if (yearMatch) {
+      string = string.slice(yearMatch.index! + yearMatch[0].length);
+    }
     const countryCodePattern = /\b(?!AC|DV)[A-Z]{2}\b/g;
     const matches = string.match(countryCodePattern);
     return matches ? [...new Set(matches)] : [];

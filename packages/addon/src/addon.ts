@@ -9,6 +9,7 @@ import {
   getMediafusionStreams,
   getOrionStreams,
   getPeerflixStreams,
+  getStremioJackettStreams,
   getTorboxStreams,
   getTorrentioStreams,
 } from '@aiostreams/wrappers';
@@ -94,7 +95,7 @@ export class AIOStreams {
       await this.getParsedStreams(streamRequest);
 
     console.log(
-      `|INF| addon > getStreams: Got ${parsedStreams.length} total parsed streams in ${getTimeTakenSincePoint(startTime)}`
+      `|INF| addon > getStreams: Got ${parsedStreams.length} parsed streams and ${errorStreams.length} error streams in ${getTimeTakenSincePoint(startTime)}`
     );
     const filterStartTime = new Date().getTime();
 
@@ -126,19 +127,19 @@ export class AIOStreams {
 
     let filteredResults = parsedStreams.filter((parsedStream) => {
       const streamTypeFilter = this.config.streamTypes?.find(
-        (streamType) => streamType[parsedStream.type]
+        (streamType) => streamType[parsedStream.type] === false
       );
-      if (this.config.streamTypes && !streamTypeFilter) return false;
+      if (this.config.streamTypes && streamTypeFilter) return false;
 
-      const resolutionFilter = this.config.resolutions.find(
-        (resolution) => resolution[parsedStream.resolution]
+      const resolutionFilter = this.config.resolutions?.find(
+        (resolution) => resolution[parsedStream.resolution] === false
       );
-      if (!resolutionFilter) return false;
+      if (resolutionFilter) return false;
 
-      const qualityFilter = this.config.qualities.find(
-        (quality) => quality[parsedStream.quality]
+      const qualityFilter = this.config.qualities?.find(
+        (quality) => quality[parsedStream.quality] === false
       );
-      if (!qualityFilter) return false;
+      if (this.config.qualities && qualityFilter) return false;
 
       // Check for HDR and DV tags in the parsed stream
       const hasHDR = parsedStream.visualTags.some((tag) =>
@@ -150,9 +151,8 @@ export class AIOStreams {
         (visualTag) => visualTag['HDR+DV'] === true
       );
 
-      // Helper function to check if a specific tag is enabled
-      const isTagEnabled = (tag: string) =>
-        this.config.visualTags.some((visualTag) => visualTag[tag] === true);
+      const isTagDisabled = (tag: string) =>
+        this.config.visualTags.some((visualTag) => visualTag[tag] === false);
 
       if (hasHDRAndDV) {
         if (!HDRAndDVEnabled) {
@@ -163,21 +163,19 @@ export class AIOStreams {
           tag.startsWith('HDR')
         );
         const disabledTags = specificHdrTags.filter(
-          (tag) => !isTagEnabled(tag)
+          (tag) => isTagDisabled(tag) === true
         );
         if (disabledTags.length > 0) {
           return false;
         }
-      } else if (hasDV && !isTagEnabled('DV')) {
+      } else if (hasDV && isTagDisabled('DV')) {
         return false;
       }
 
       // Check other visual tags for explicit disabling
       for (const tag of parsedStream.visualTags) {
         if (tag.startsWith('HDR') || tag === 'DV') continue;
-        if (isTagEnabled(tag) === false) {
-          return false;
-        }
+        if (isTagDisabled(tag)) return false;
       }
 
       // apply excludedLanguages filter
@@ -198,14 +196,16 @@ export class AIOStreams {
         return false;
       }
 
-      const audioTagFilter = parsedStream.audioTags.find(
-        (tag) => !this.config.audioTags.some((audioTag) => audioTag[tag])
+      const audioTagFilter = parsedStream.audioTags.find((tag) =>
+        this.config.audioTags.some((audioTag) => audioTag[tag] === false)
       );
       if (audioTagFilter) return false;
 
       if (
         parsedStream.encode &&
-        !this.config.encodes.some((encode) => encode[parsedStream.encode])
+        this.config.encodes.some(
+          (encode) => encode[parsedStream.encode] === false
+        )
       )
         return false;
 
@@ -266,10 +266,12 @@ export class AIOStreams {
       if (
         this.config.excludeFilters &&
         this.config.excludeFilters.length > 0 &&
-        parsedStream.filename &&
         excludeRegex
       ) {
-        if (excludeRegex.test(parsedStream.filename)) {
+        if (parsedStream.filename && excludeRegex.test(parsedStream.filename)) {
+          return false;
+        }
+        if (parsedStream.indexers && excludeRegex.test(parsedStream.indexers)) {
           return false;
         }
       }
@@ -277,10 +279,12 @@ export class AIOStreams {
       if (
         this.config.strictIncludeFilters &&
         this.config.strictIncludeFilters.length > 0 &&
-        parsedStream.filename &&
         strictIncludeRegex
       ) {
-        if (!strictIncludeRegex.test(parsedStream.filename)) {
+        if (
+          parsedStream.filename &&
+          !strictIncludeRegex.test(parsedStream.filename)
+        ) {
           return false;
         }
       }
@@ -384,7 +388,10 @@ export class AIOStreams {
     // then apply our this.config sorting
     filteredResults.sort((a, b) => {
       for (const sortByField of this.config.sortBy) {
-        const field = Object.keys(sortByField)[0];
+        const field = Object.keys(sortByField).find(
+          (key) => typeof sortByField[key] === 'boolean'
+        );
+        if (!field) continue;
         const value = sortByField[field];
 
         if (value) {
@@ -613,7 +620,7 @@ export class AIOStreams {
           ? `🎲 ${name}`
           : name,
       description: this.config.addonNameInDescription
-        ? `🎲 ${name}\n${description}`
+        ? `🎲 ${name.split('\n').join(' ')}\n${description}`
         : description,
       subtitles: parsedStream.stream?.subtitles,
       sources: parsedStream.torrent?.sources,
@@ -868,6 +875,16 @@ export class AIOStreams {
   ): Promise<{ parsedStreams: ParsedStream[]; errorStreams: ErrorStream[] }> {
     const parsedStreams: ParsedStream[] = [];
     const errorStreams: ErrorStream[] = [];
+    const formatError = (error: string) =>
+      typeof error === 'string'
+        ? error
+            .replace(/- |: /g, '\n')
+            .split('\n')
+            .map((line: string) => line.trim())
+            .join('\n')
+            .trim()
+        : error;
+
     const addonPromises = this.config.addons.map(async (addon) => {
       const addonName =
         addon.options.name ||
@@ -885,25 +902,19 @@ export class AIOStreams {
         parsedStreams.push(...addonStreams);
         errorStreams.push(
           ...[...new Set(addonErrors)].map((error) => ({
-            error,
+            error: formatError(error),
             addon: { id: addonId, name: addonName },
           }))
         );
         console.log(
-          `|INF| addon > getParsedStreams: Got ${parsedStreams.length} streams from addon ${addonName} in ${getTimeTakenSincePoint(startTime)}`
+          `|INF| addon > getParsedStreams: Got ${addonStreams.length} streams ${addonErrors.length > 0 ? `and ${addonErrors.length} errors ` : ''}from addon ${addonName} in ${getTimeTakenSincePoint(startTime)}`
         );
       } catch (error: any) {
         console.error(
           `|ERR| addon > getParsedStreams: Failed to get streams from ${addonName}: ${error}`
         );
         errorStreams.push({
-          error: `${error.message
-            .replace('-', '\n')
-            .replace(':', '\n')
-            .split('\n')
-            .map((line: string) => line.trim())
-            .join('\n')
-            .trim()}`,
+          error: formatError(error.message ?? error ?? 'Unknown error'),
           addon: {
             id: addonId,
             name: addonName,
@@ -948,6 +959,14 @@ export class AIOStreams {
       }
       case 'mediafusion': {
         return await getMediafusionStreams(
+          this.config,
+          addon.options,
+          streamRequest,
+          addonId
+        );
+      }
+      case 'stremio-jackett': {
+        return await getStremioJackettStreams(
           this.config,
           addon.options,
           streamRequest,
@@ -1023,10 +1042,7 @@ export class AIOStreams {
             ? parseInt(addon.options.indexerTimeout)
             : Settings.DEFAULT_GDRIVE_TIMEOUT
         );
-        return {
-          addonStreams: await wrapper.getParsedStreams(streamRequest),
-          addonErrors: [],
-        };
+        return await wrapper.getParsedStreams(streamRequest);
       }
       default: {
         if (!addon.options.url) {
@@ -1043,10 +1059,7 @@ export class AIOStreams {
             ? parseInt(addon.options.indexerTimeout)
             : undefined
         );
-        return {
-          addonStreams: await wrapper.getParsedStreams(streamRequest),
-          addonErrors: [],
-        };
+        return wrapper.getParsedStreams(streamRequest);
       }
     }
   }
@@ -1109,10 +1122,10 @@ export class AIOStreams {
       // Select cached streams by provider and addon priority
       const selectedCachedStream = cachedStreams.sort((a, b) => {
         const aProviderIndex = this.config.services.findIndex(
-          (service) => service.id === a.provider!.id
+          (service) => service.id === a.provider?.id
         );
         const bProviderIndex = this.config.services.findIndex(
-          (service) => service.id === b.provider!.id
+          (service) => service.id === b.provider?.id
         );
 
         if (aProviderIndex !== bProviderIndex) {

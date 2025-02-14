@@ -1,4 +1,4 @@
-import { AddonDetail, StreamRequest } from '@aiostreams/types';
+import { AddonDetail, ParseResult, StreamRequest } from '@aiostreams/types';
 import { ParsedStream, Stream, Config } from '@aiostreams/types';
 import { BaseWrapper } from './base';
 import { addonDetails } from '@aiostreams/utils';
@@ -25,11 +25,27 @@ export class Comet extends BaseWrapper {
       indexerTimeout || Settings.DEFAULT_COMET_TIMEOUT
     );
   }
+
+  protected parseStream(stream: Stream): ParseResult {
+    const parsedStream = super.parseStream(stream);
+    if (stream.url && parsedStream.type === 'stream') {
+      parsedStream.result.filename = stream.description?.split('\n')[0];
+      // force COMET_FORCE_HOSTNAME if provided
+      if (Settings.FORCE_COMET_HOSTNAME) {
+        const url = new URL(stream.url);
+        url.hostname = Settings.FORCE_COMET_HOSTNAME;
+        url.port = Settings.FORCE_COMET_PORT;
+        url.protocol = Settings.FORCE_COMET_PROTOCOL;
+        parsedStream.result.url = url.toString();
+      }
+    }
+    return parsedStream;
+  }
 }
 
 const getCometConfig = (debridService: string, debridApiKey: string) => {
   return {
-    indexers: ['bitsearch', 'eztv', 'thepiratebay', 'therarbg', 'yts'],
+    indexers: Settings.COMET_INDEXERS,
     maxResults: 0,
     maxResultsPerResolution: 0,
     maxSize: 0,
@@ -77,10 +93,7 @@ export async function getCometStreams(
       config,
       indexerTimeout
     );
-    return {
-      addonStreams: await comet.getParsedStreams(streamRequest),
-      addonErrors: [],
-    };
+    return await comet.getParsedStreams(streamRequest);
   }
 
   // find all usable and enabled services
@@ -134,10 +147,7 @@ export async function getCometStreams(
       indexerTimeout
     );
 
-    return {
-      addonStreams: await comet.getParsedStreams(streamRequest),
-      addonErrors: [],
-    };
+    return await comet.getParsedStreams(streamRequest);
   }
 
   // if no prioritised service is provided, create a comet instance for each service
@@ -147,6 +157,9 @@ export async function getCometStreams(
   }
   const errorMessages: string[] = [];
   const streamPromises = servicesToUse.map(async (service) => {
+    console.log(
+      `|INF| wrappers > comet: Getting Comet streams for service: ${service.id}`
+    );
     const cometConfig = getCometConfig(service.id, service.credentials.apiKey);
     const configString = Buffer.from(JSON.stringify(cometConfig)).toString(
       'base64'
@@ -165,7 +178,9 @@ export async function getCometStreams(
   const results = await Promise.allSettled(streamPromises);
   results.forEach((result) => {
     if (result.status === 'fulfilled') {
-      parsedStreams.push(...result.value);
+      const streams = result.value;
+      parsedStreams.push(...streams.addonStreams);
+      errorMessages.push(...streams.addonErrors);
     } else {
       errorMessages.push(result.reason.message);
     }
