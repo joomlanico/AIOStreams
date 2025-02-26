@@ -11,7 +11,7 @@ import { createLogger } from './logger';
 
 const logger = createLogger('crypto');
 
-export const loadSecretKey = (): Buffer | string => {
+export const loadSecretKey = (log: boolean = false): Buffer | string => {
   const secretKey = Settings.SECRET_KEY;
   if (!secretKey) {
     console.error('No secret key provided');
@@ -21,17 +21,18 @@ export const loadSecretKey = (): Buffer | string => {
 
   if (secretKey.length === 32) {
     // backwards compatibility
-    logger.warn(
-      'Secret key is 32 characters long, consider updating to a 64 character key and reconfiguring for better security'
-    );
+    if (log)
+      logger.warn(
+        'Secret key is 32 characters long, consider updating to a 64 character key and reconfiguring for better security'
+      );
     return secretKey;
   } else if (secretKey.length !== 64) {
-    logger.error('Secret key must be 64 characters long');
+    if (log) logger.error('Secret key must be 64 characters long');
     throw new Error('Secret key must be 64 characters long');
   }
 
   if (!/^[0-9a-fA-F]+$/.test(secretKey)) {
-    logger.error('Secret key must be a hex string (0-9, a-f)');
+    if (log) logger.error('Secret key must be a hex string (0-9, a-f)');
     throw new Error('Secret key must be a hex string (0-9, a-f)');
   }
 
@@ -129,4 +130,12 @@ export function getTextHash(text: string): string {
   const hash = createHash('sha256');
   hash.update(text);
   return hash.digest('hex');
+}
+
+export function isValueEncrypted(value?: string): boolean {
+  if (!value) return false;
+  const tests =
+    /^E2-[^-]+-[^-]+$/.test(value) ||
+    /^E-[0-9a-fA-F]{32}-[0-9a-fA-F]+$/.test(value);
+  return tests;
 }
